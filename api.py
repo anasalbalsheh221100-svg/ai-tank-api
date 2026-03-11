@@ -6,11 +6,17 @@ from fastapi import FastAPI, UploadFile, File
 import tensorflow as tf
 from PIL import Image
 from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
-from sqlmodel import SQLModel
-from database import engine
+
+from sqlmodel import SQLModel, select
+from database import engine, get_session
+from models import Tank
+
 
 app = FastAPI(title="AI Tank Museum Guide API")
+
+# create database tables
 SQLModel.metadata.create_all(engine)
+
 
 # =========================
 # PATHS
@@ -20,6 +26,7 @@ MODELS_DIR = PROJECT_ROOT / "models"
 RESULTS_DIR = PROJECT_ROOT / "results" / "improved_gray_balanced"
 
 IMG_SIZE = (224, 224)
+
 
 # =========================
 # FIND MODEL
@@ -35,6 +42,7 @@ def find_latest_best_model():
 # LAZY LOAD MODEL
 # =========================
 model = None
+
 
 def get_model():
     global model
@@ -57,7 +65,7 @@ if metrics_path.exists():
     metrics_data = json.loads(metrics_path.read_text(encoding="utf-8"))
     class_names = metrics_data["class_names"]
 else:
-    print("WARNING: metrics.json not found, using placeholder class")
+    print("WARNING: metrics.json not found")
     class_names = ["unknown"]
 
 
@@ -73,9 +81,7 @@ def preprocess_image(image_bytes: bytes):
     img = img.resize(IMG_SIZE)
 
     x = np.array(img).astype(np.float32)
-
     x = preprocess_input(x)
-
     x = np.expand_dims(x, axis=0)
 
     return x
@@ -105,48 +111,47 @@ async def predict(file: UploadFile = File(...)):
 
     try:
 
-        # 1️⃣ check file type
+        # check file type
         if not file.content_type.startswith("image"):
             return {"error": "File must be an image"}
 
-        # 2️⃣ read file
         image_bytes = await file.read()
 
         if not image_bytes:
             return {"error": "Empty file"}
 
-        # 3️⃣ preprocess image
+        # preprocess image
         x = preprocess_image(image_bytes)
 
-        # 4️⃣ load model
+        # load model
         model = get_model()
 
-        # 5️⃣ predict
+        # predict
         probs = model.predict(x, verbose=0)[0]
 
         pred_index = int(np.argmax(probs))
         confidence = float(probs[pred_index])
 
-        # 🔎 debug prints (will appear in Render logs)
+        # debug logs
         print("Predicted index:", pred_index)
-        print("Probabilities:", probs)
         print("Class names:", class_names)
 
-        # 6️⃣ safe class lookup
         if pred_index < len(class_names):
             tank_name = class_names[pred_index]
-            from sqlmodel import select
-            from database import get_session
-            from models import Tank
-            session = next(get_session())
+        else:
+            tank_name = "unknown"
+
+        # =========================
+        # DATABASE QUERY
+        # =========================
+        tank = None
+
+        with next(get_session()) as session:
 
             tank = session.exec(
                 select(Tank).where(Tank.name == tank_name)
             ).first()
-        else:
-            tank_name = "unknown"
 
-        # 7️⃣ response
         return {
             "tank_name": tank_name,
             "confidence": confidence,
@@ -155,14 +160,6 @@ async def predict(file: UploadFile = File(...)):
             "description": tank.description if tank else None
         }
 
-    except Exception as e:
-
-        # print error to Render logs
-        print("Prediction error:", str(e))
-
-        return {
-            "error": str(e)
-        }
     except Exception as e:
 
         print("Prediction error:", e)
