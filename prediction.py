@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 from pillow_heif import register_heif_opener
 register_heif_opener()
 
+
 # =========================
 # PROJECT PATHS
 # =========================
@@ -84,21 +85,16 @@ def load_class_names() -> list:
 # =========================
 # PREPROCESS (MATCH TRAINING)
 # =========================
-def preprocess_any_image_to_model_input(image_path: Path) -> np.ndarray:
-    """
-    Match training preprocessing:
-      - convert to grayscale (L)
-      - convert back to RGB (3 channels)
-      - resize 224x224
-      - preprocess_input (MobileNetV2)
-    """
-    img = Image.open(image_path)
+def preprocess_any_image_to_model_input(file) -> np.ndarray:
+
+    img = Image.open(file)
     img = img.convert("L").convert("RGB")
     img = img.resize(IMG_SIZE)
 
     x = np.array(img).astype(np.float32)
     x = preprocess_input(x)
     x = np.expand_dims(x, axis=0)
+
     return x
 
 
