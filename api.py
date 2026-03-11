@@ -102,38 +102,53 @@ async def predict(file: UploadFile = File(...)):
 
     try:
 
-        # Validate file
+        # 1️⃣ check file type
         if not file.content_type.startswith("image"):
             return {"error": "File must be an image"}
 
+        # 2️⃣ read file
         image_bytes = await file.read()
 
         if not image_bytes:
             return {"error": "Empty file"}
 
-        # preprocess
+        # 3️⃣ preprocess image
         x = preprocess_image(image_bytes)
 
-        # load model
+        # 4️⃣ load model
         model = get_model()
 
-        # predict
+        # 5️⃣ predict
         probs = model.predict(x, verbose=0)[0]
 
         pred_index = int(np.argmax(probs))
         confidence = float(probs[pred_index])
 
-        tank_name = (
-            class_names[pred_index]
-            if pred_index < len(class_names)
-            else "unknown"
-        )
+        # 🔎 debug prints (will appear in Render logs)
+        print("Predicted index:", pred_index)
+        print("Probabilities:", probs)
+        print("Class names:", class_names)
 
+        # 6️⃣ safe class lookup
+        if pred_index < len(class_names):
+            tank_name = class_names[pred_index]
+        else:
+            tank_name = "unknown"
+
+        # 7️⃣ response
         return {
             "tank_name": tank_name,
             "confidence": confidence
         }
 
+    except Exception as e:
+
+        # print error to Render logs
+        print("Prediction error:", str(e))
+
+        return {
+            "error": str(e)
+        }
     except Exception as e:
 
         print("Prediction error:", e)
