@@ -6,8 +6,11 @@ from fastapi import FastAPI, UploadFile, File
 import tensorflow as tf
 from PIL import Image
 from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
+from sqlmodel import SQLModel
+from database import engine
 
 app = FastAPI(title="AI Tank Museum Guide API")
+SQLModel.metadata.create_all(engine)
 
 # =========================
 # PATHS
@@ -132,13 +135,24 @@ async def predict(file: UploadFile = File(...)):
         # 6️⃣ safe class lookup
         if pred_index < len(class_names):
             tank_name = class_names[pred_index]
+            from sqlmodel import select
+            from database import get_session
+            from models import Tank
+            session = next(get_session())
+
+            tank = session.exec(
+                select(Tank).where(Tank.name == tank_name)
+            ).first()
         else:
             tank_name = "unknown"
 
         # 7️⃣ response
         return {
             "tank_name": tank_name,
-            "confidence": confidence
+            "confidence": confidence,
+            "country": tank.country if tank else None,
+            "year": tank.year if tank else None,
+            "description": tank.description if tank else None
         }
 
     except Exception as e:
