@@ -27,17 +27,21 @@ def find_latest_best_model():
         raise FileNotFoundError("No trained model found in models folder.")
     return candidates[-1]
 
+
 # =========================
-# LOAD MODEL (lazy loading)
+# LAZY LOAD MODEL
 # =========================
 model = None
 
 def get_model():
     global model
+
     if model is None:
         model_path = find_latest_best_model()
         print("Loading model:", model_path)
+
         model = tf.keras.models.load_model(model_path)
+
     return model
 
 
@@ -50,20 +54,25 @@ if metrics_path.exists():
     metrics_data = json.loads(metrics_path.read_text(encoding="utf-8"))
     class_names = metrics_data["class_names"]
 else:
-    print("metrics.json not found, using placeholder class")
+    print("WARNING: metrics.json not found, using placeholder class")
     class_names = ["unknown"]
 
 
 # =========================
-# PREPROCESS IMAGE
+# IMAGE PREPROCESSING
 # =========================
 def preprocess_image(image_bytes: bytes):
+
     img = Image.open(io.BytesIO(image_bytes))
+
+    # match training preprocessing
     img = img.convert("L").convert("RGB")
     img = img.resize(IMG_SIZE)
 
     x = np.array(img).astype(np.float32)
+
     x = preprocess_input(x)
+
     x = np.expand_dims(x, axis=0)
 
     return x
@@ -78,30 +87,57 @@ def root():
 
 
 # =========================
+# HEALTH CHECK
+# =========================
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+# =========================
 # PREDICT ENDPOINT
 # =========================
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
 
-    image_bytes = await file.read()
+    try:
 
-    x = preprocess_image(image_bytes)
+        # Validate file
+        if not file.content_type.startswith("image"):
+            return {"error": "File must be an image"}
 
-    model = get_model()
+        image_bytes = await file.read()
 
-    probs = model.predict(x, verbose=0)[0]
+        if not image_bytes:
+            return {"error": "Empty file"}
 
-    pred_index = int(np.argmax(probs))
-    confidence = float(probs[pred_index])
+        # preprocess
+        x = preprocess_image(image_bytes)
 
-    tank_name = (
-        class_names[pred_index]
-        if pred_index < len(class_names)
-        else "unknown"
-    )
+        # load model
+        model = get_model()
 
-    return {
-        "tank_name": tank_name,
-        "confidence": confidence
-    }
+        # predict
+        probs = model.predict(x, verbose=0)[0]
 
+        pred_index = int(np.argmax(probs))
+        confidence = float(probs[pred_index])
+
+        tank_name = (
+            class_names[pred_index]
+            if pred_index < len(class_names)
+            else "unknown"
+        )
+
+        return {
+            "tank_name": tank_name,
+            "confidence": confidence
+        }
+
+    except Exception as e:
+
+        print("Prediction error:", e)
+
+        return {
+            "error": str(e)
+        }
