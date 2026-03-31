@@ -29,7 +29,10 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # =========================
 # APP
 # =========================
-app = FastAPI()
+app = FastAPI(
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
 
 app.add_middleware(
     CORSMiddleware,
