@@ -59,16 +59,18 @@ IMG_SIZE = (224, 224)
 # =========================
 def get_model():
     global model
+
     if model is None:
-        model_files = list(MODELS_DIR.glob("*.keras"))
+        model_files = list(MODELS_DIR.glob("*.h5"))  # 🔥 مهم
 
         if not model_files:
             raise Exception("NO MODEL FILE FOUND IN models/")
 
         model_path = model_files[-1]
-        print("LOADING MODEL FROM:", model_path)
 
-        model = tf.keras.models.load_model(model_path)
+        print("LOADING MODEL:", model_path)
+
+        model = tf.keras.models.load_model(model_path, compile=False)
 
     return model
 
