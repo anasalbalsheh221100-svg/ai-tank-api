@@ -1,8 +1,9 @@
-import tensorflow as tf
+import keras
 
-model = tf.keras.models.load_model(
+model = keras.models.load_model(
     "models/improved_gray_balanced_best_20260104_015524.keras"
 )
 
-model.save("models/model.keras")
+model.save("models/model_fixed.keras")
+
 print("DONE")
