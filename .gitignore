@@ -1,0 +1,12 @@
+split_dataset_gray_balanced/
+images/
+
+results/*
+!results/improved_gray_balanced/metrics.json
+
+__pycache__/
+*.pyc
+.venv/
+.idea/
+tank.db
+.env
