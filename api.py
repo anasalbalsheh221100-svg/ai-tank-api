@@ -4,7 +4,7 @@ import numpy as np
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, Depends
 import tensorflow as tf
-from PIL import Image
+from PIL import Image, ImageFile
 from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 
 from sqlmodel import SQLModel, Session, select
@@ -16,7 +16,6 @@ from dotenv import load_dotenv
 import os
 from openai import OpenAI
 from pydantic import BaseModel
-
 
 # =========================
 # ENV + OPENAI
@@ -46,7 +45,7 @@ current_tank = {}
 chat_history = []
 
 # =========================
-# MODEL
+# PATHS
 # =========================
 PROJECT_ROOT = Path(__file__).resolve().parent
 MODELS_DIR = PROJECT_ROOT / "models"
@@ -55,40 +54,35 @@ RESULTS_DIR = PROJECT_ROOT / "results" / "improved_gray_balanced"
 model = None
 IMG_SIZE = (224, 224)
 
+# =========================
+# LOAD MODEL (FIXED)
+# =========================
 def get_model():
     global model
     if model is None:
-        model_path = sorted(MODELS_DIR.glob("*.keras"))[-1]
+        model_files = list(MODELS_DIR.glob("*.keras"))
+
+        if not model_files:
+            raise Exception("NO MODEL FILE FOUND IN models/")
+
+        model_path = model_files[-1]
+        print("LOADING MODEL FROM:", model_path)
+
         model = tf.keras.models.load_model(model_path)
+
     return model
 
-
-print("MODEL LOADED SUCCESSFULLY")
-
 # =========================
-# CLASS NAMES
+# CLASS NAMES (SAFE)
 # =========================
 metrics_path = RESULTS_DIR / "metrics.json"
 
 if metrics_path.exists():
     class_names = json.loads(metrics_path.read_text())["class_names"]
+    print("CLASS NAMES LOADED")
 else:
     class_names = ["unknown"]
-
-# =========================
-# PREPROCESS (FIXED)
-# =========================
-def preprocess_image(image_bytes):
-    img = Image.open(io.BytesIO(image_bytes)).convert("L")  # grayscale
-    img = img.resize(IMG_SIZE)
-
-    arr = np.array(img)
-    arr = np.stack((arr,)*3, axis=-1)   # important
-
-    arr = arr.astype(np.float32)
-    arr = preprocess_input(arr)
-
-    return np.expand_dims(arr, axis=0)
+    print("WARNING: metrics.json NOT FOUND")
 
 # =========================
 # GPT FUNCTION
@@ -107,7 +101,7 @@ class ChatRequest(BaseModel):
     message: str
 
 # =========================
-# PREDICT
+# PREDICT (FIXED + DEBUG)
 # =========================
 @app.post("/predict")
 def predict(
@@ -118,108 +112,106 @@ def predict(
 
     print("START PREDICT")
 
-    # =========================
-    # READ IMAGE (SAFE)
-    # =========================
-    from PIL import ImageFile
-    ImageFile.LOAD_TRUNCATED_IMAGES = True
-
-    file.file.seek(0)
-
     try:
+        ImageFile.LOAD_TRUNCATED_IMAGES = True
+        file.file.seek(0)
+
+        # =========================
+        # READ IMAGE
+        # =========================
         img = Image.open(file.file)
         img = img.convert("RGB")
-    except Exception as e:
-        print("IMAGE ERROR:", e)
-        return {"error": "Invalid image file"}
+        print("IMAGE LOADED")
 
-    # =========================
-    # PREPROCESS
-    # =========================
-    img = img.resize(IMG_SIZE)
+        # =========================
+        # PREPROCESS
+        # =========================
+        img = img.resize(IMG_SIZE)
+        arr = np.array(img).astype(np.float32)
+        arr = preprocess_input(arr)
+        arr = np.expand_dims(arr, axis=0)
 
-    arr = np.array(img).astype(np.float32)
-    arr = preprocess_input(arr)
-    arr = np.expand_dims(arr, axis=0)
+        print("IMAGE PREPROCESSED")
 
-    # =========================
-    # PREDICT
-    # =========================
-    model = get_model()
-    probs = model.predict(arr)[0]
+        # =========================
+        # MODEL
+        # =========================
+        model = get_model()
+        print("MODEL READY")
 
-    print("PROBS:", probs)
-    print("MAX:", np.max(probs))
+        probs = model.predict(arr)[0]
+        print("PREDICTION DONE")
 
-    idx = int(np.argmax(probs))
-    confidence = float(probs[idx])
+        idx = int(np.argmax(probs))
+        confidence = float(probs[idx])
 
-    # =========================
-    # 🔥 THRESHOLD (الأهم)
-    # =========================
-    if confidence < 0.8:
-        tank_name = "Unknown try another image"
-    else:
-        tank_name = class_names[idx]
+        # =========================
+        # THRESHOLD
+        # =========================
+        if confidence < 0.8:
+            tank_name = "Unknown try another image"
+        else:
+            tank_name = class_names[idx]
 
-    # =========================
-    # DATABASE
-    # =========================
-    tank = None
-    if tank_name != "Unknown":
-        tank = session.exec(
-            select(Tank).where(Tank.name.ilike(f"%{tank_name}%"))
-        ).first()
+        # =========================
+        # DATABASE
+        # =========================
+        tank = None
+        if tank_name != "Unknown":
+            tank = session.exec(
+                select(Tank).where(Tank.name.ilike(f"%{tank_name}%"))
+            ).first()
 
-    # =========================
-    # CURRENT STATE
-    # =========================
-    current_tank = {
-        "name": tank.name if tank else tank_name,
-        "description": tank.description if tank else ""
-    }
+        # =========================
+        # CURRENT STATE
+        # =========================
+        current_tank = {
+            "name": tank.name if tank else tank_name,
+            "description": tank.description if tank else ""
+        }
 
-    # =========================
-    # CHAT RESET
-    # =========================
-    chat_history = [
-        {
-            "role": "system",
-            "content": f"""
+        # =========================
+        # CHAT RESET
+        # =========================
+        chat_history = [
+            {
+                "role": "system",
+                "content": f"""
 You are a military museum guide.
 Explain in SIMPLE and SHORT way (max 4-5 lines).
 
 Tank: {current_tank['name']}
 Description: {current_tank['description']}
 """
+            }
+        ]
+
+        # =========================
+        # GPT
+        # =========================
+        if tank_name == "Unknown":
+            gpt_text = "This does not look like a tank. Please try another image."
+        else:
+            try:
+                gpt_text = ask_gpt(chat_history)
+            except Exception as e:
+                print("GPT ERROR:", e)
+                gpt_text = "AI is currently unavailable."
+
+        print("DONE PREDICT")
+
+        return {
+            "tank_name": current_tank["name"],
+            "confidence": round(confidence, 4),
+            "country": tank.country if tank else None,
+            "year": tank.year if tank else None,
+            "description": current_tank["description"],
+            "gpt_explanation": gpt_text
         }
-    ]
 
-    # =========================
-    # GPT (SAFE)
-    # =========================
-    if tank_name == "Unknown":
-        gpt_text = "This does not look like a tank. Please try another image."
-    else:
-        try:
-            gpt_text = ask_gpt(chat_history)
-        except:
-            gpt_text = "AI is currently unavailable."
-
-    print("DONE PREDICT")
-
-    # =========================
-    # RESPONSE
-    # =========================
-    return {
-        "tank_name": current_tank["name"],
-        "confidence": round(confidence, 4),
-        "country": tank.country if tank else None,
-        "year": tank.year if tank else None,
-        "description": current_tank["description"],
-        "gpt_explanation": gpt_text
-    }
-
+    except Exception as e:
+        print("ERROR:", str(e))
+        return {"error": str(e)}
 
 # =========================
 # CHAT
@@ -230,7 +222,6 @@ def chat(req: ChatRequest):
 
     message = req.message
 
-    # 🔥 أهم سطر
     context = f"""
 Current tank: {current_tank.get("name")}
 Description: {current_tank.get("description")}

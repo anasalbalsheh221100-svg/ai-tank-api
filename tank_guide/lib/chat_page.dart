@@ -51,12 +51,26 @@ class _ChatPageState extends State<ChatPage> {
 
     try {
       var res = await http.post(
-        Uri.parse("https://ai-tank-api-5.onrender.com/chat"),
-        headers: {"Content-Type": "application/json"},
-        body: jsonEncode({"message": userText}),
-      ).timeout(const Duration(seconds: 15));
+      Uri.parse("https://ai-tank-api-5.onrender.com/chat"),
+      headers: {"Content-Type": "application/json"},
+      body: jsonEncode({"message": userText}),
+    ).timeout(const Duration(seconds: 15));
 
-      final decoded = jsonDecode(res.body);
+    // 🔥 هذا الصح
+    if (res.statusCode != 200) {
+      setState(() {
+        messages.add({
+          "role": "bot",
+          "text": "Server error: ${res.body}",
+        });
+        isLoading = false;
+      });
+      return;
+    }
+
+    // =========================
+    final decoded = jsonDecode(res.body);
+
 
       setState(() {
         messages.add({"role": "bot", "text": decoded['reply'] ?? "No reply"});
