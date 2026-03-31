@@ -1,3 +1,4 @@
+
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
@@ -18,7 +19,6 @@ class _ChatPageState extends State<ChatPage> {
   final ScrollController _scrollController = ScrollController();
 
   List<Map<String, dynamic>> messages = [];
-
   bool isLoading = false;
 
   // =========================
@@ -51,34 +51,37 @@ class _ChatPageState extends State<ChatPage> {
 
     try {
       var res = await http.post(
-      Uri.parse("https://ai-tank-api-5.onrender.com/chat"),
-      headers: {"Content-Type": "application/json"},
-      body: jsonEncode({"message": userText}),
-    ).timeout(const Duration(seconds: 15));
+        Uri.parse("https://ai-tank-api-13cc.onrender.com/chat"), // ✅ updated URL
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({"message": userText}),
+      ).timeout(const Duration(seconds: 60));
 
-    // 🔥 هذا الصح
-    if (res.statusCode != 200) {
+      if (res.statusCode != 200) {
+        setState(() {
+          messages.add({
+            "role": "bot",
+            "text": "Server error: ${res.body}",
+          });
+          isLoading = false;
+        });
+        return;
+      }
+
+      final decoded = jsonDecode(res.body);
+
       setState(() {
         messages.add({
           "role": "bot",
-          "text": "Server error: ${res.body}",
+          "text": decoded['reply'] ?? "No reply"
         });
-        isLoading = false;
-      });
-      return;
-    }
-
-    // =========================
-    final decoded = jsonDecode(res.body);
-
-
-      setState(() {
-        messages.add({"role": "bot", "text": decoded['reply'] ?? "No reply"});
         isLoading = false;
       });
     } catch (e) {
       setState(() {
-        messages.add({"role": "bot", "text": "Error sending message"});
+        messages.add({
+          "role": "bot",
+          "text": "Error sending message"
+        });
         isLoading = false;
       });
     }
@@ -92,18 +95,12 @@ class _ChatPageState extends State<ChatPage> {
   // =========================
   Future<void> sendImage() async {
     final picked = await picker.pickImage(source: ImageSource.gallery);
-
     if (picked == null) return;
 
     Uint8List bytes = await picked.readAsBytes();
 
-    print("IMAGE SIZE: ${bytes.length}");
-
     setState(() {
-      messages.add({
-        "role": "user",
-        "image": bytes,
-      });
+      messages.add({"role": "user", "image": bytes});
       isLoading = true;
     });
 
@@ -111,7 +108,7 @@ class _ChatPageState extends State<ChatPage> {
 
     var request = http.MultipartRequest(
       'POST',
-      Uri.parse("https://ai-tank-api-5.onrender.com/predict"),
+      Uri.parse("https://ai-tank-api-13cc.onrender.com/predict"), // ✅ updated URL
     );
 
     request.files.add(
@@ -125,25 +122,24 @@ class _ChatPageState extends State<ChatPage> {
 
     try {
       var response = await request.send().timeout(
-        const Duration(seconds: 20),
+        const Duration(seconds: 60),
       );
 
       var resBody = await response.stream.bytesToString();
-      print("RESPONSE: $resBody");
-
       final decoded = jsonDecode(resBody);
 
       setState(() {
         messages.add({
           "role": "bot",
           "text": decoded["error"] ??
-              "Tank: ${decoded['tank_name']}\nConfidence: ${(decoded['confidence'] * 100).toStringAsFixed(2)}%",
+              "Tank: ${decoded['tank_name']}\n"
+              "Confidence: ${(decoded['confidence'] * 100).toStringAsFixed(2)}%\n\n"
+              "${decoded['gpt_explanation']}", // ✅ added GPT output
         });
         isLoading = false;
       });
     } catch (e) {
-      print("ERROR: $e");
-
+        print("ERROR: $e");
       setState(() {
         messages.add({
           "role": "bot",
@@ -157,7 +153,7 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   // =========================
-  // MESSAGE WIDGET
+  // MESSAGE UI
   // =========================
   Widget buildMessage(Map<String, dynamic> msg) {
     bool isUser = msg['role'] == 'user';
@@ -173,13 +169,7 @@ class _ChatPageState extends State<ChatPage> {
           borderRadius: BorderRadius.circular(10),
         ),
         child: msg["image"] != null
-            ? Image.memory(
-                msg["image"]!,
-                height: 150,
-                errorBuilder: (context, error, stackTrace) {
-                  return const Text("Image failed");
-                },
-              )
+            ? Image.memory(msg["image"]!, height: 150)
             : Text(
                 msg['text'] ?? "",
                 style: TextStyle(
@@ -210,9 +200,7 @@ class _ChatPageState extends State<ChatPage> {
               },
             ),
           ),
-
           if (isLoading) const CircularProgressIndicator(),
-
           Padding(
             padding: const EdgeInsets.all(10),
             child: Row(
@@ -242,3 +230,4 @@ class _ChatPageState extends State<ChatPage> {
     );
   }
 }
+

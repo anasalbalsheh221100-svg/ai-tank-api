@@ -36,7 +36,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],   # يسمح لأي frontend (Flutter web)
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -192,7 +192,7 @@ Description: {current_tank['description']}
                 gpt_text = ask_gpt(chat_history)
             except Exception as e:
                 print("GPT ERROR:", e)
-                gpt_text = "AI is unavailable."
+                gpt_text = str(e)
 
         print("DONE PREDICT")
 
