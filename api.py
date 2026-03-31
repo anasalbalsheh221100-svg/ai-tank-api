@@ -70,7 +70,11 @@ def get_model():
 
         print("LOADING MODEL:", model_path)
 
-        model = tf.keras.models.load_model(model_path, compile=False)
+        model = tf.keras.models.load_model(
+            model_path,
+            compile=False,
+            safe_mode=False
+        )
 
     return model
 
