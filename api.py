@@ -1,3 +1,6 @@
+# =========================
+# IMPORTS
+# =========================
 import io
 import json
 import numpy as np
@@ -18,7 +21,7 @@ from openai import OpenAI
 from pydantic import BaseModel
 
 # =========================
-# ENV + OPENAI
+# ENV
 # =========================
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -55,19 +58,19 @@ model = None
 IMG_SIZE = (224, 224)
 
 # =========================
-# LOAD MODEL (FIXED)
+# LOAD MODEL (FINAL FIX)
 # =========================
 def get_model():
     global model
 
     if model is None:
-        model_files = list(MODELS_DIR.glob("*.keras")) or list(MODELS_DIR.glob("*.h5"))  # 🔥 مهم
+        # 🔥 أهم سطر (يدعم keras + h5)
+        model_files = list(MODELS_DIR.glob("*.keras")) or list(MODELS_DIR.glob("*.h5"))
 
         if not model_files:
             raise Exception("NO MODEL FILE FOUND IN models/")
 
         model_path = model_files[-1]
-
         print("LOADING MODEL:", model_path)
 
         model = tf.keras.models.load_model(
@@ -79,7 +82,7 @@ def get_model():
     return model
 
 # =========================
-# CLASS NAMES (SAFE)
+# CLASS NAMES
 # =========================
 metrics_path = RESULTS_DIR / "metrics.json"
 
@@ -91,7 +94,7 @@ else:
     print("WARNING: metrics.json NOT FOUND")
 
 # =========================
-# GPT FUNCTION
+# GPT
 # =========================
 def ask_gpt(messages):
     response = client.chat.completions.create(
@@ -107,7 +110,7 @@ class ChatRequest(BaseModel):
     message: str
 
 # =========================
-# PREDICT (FIXED + DEBUG)
+# PREDICT
 # =========================
 @app.post("/predict")
 def predict(
@@ -122,16 +125,12 @@ def predict(
         ImageFile.LOAD_TRUNCATED_IMAGES = True
         file.file.seek(0)
 
-        # =========================
         # READ IMAGE
-        # =========================
         img = Image.open(file.file)
         img = img.convert("RGB")
         print("IMAGE LOADED")
 
-        # =========================
         # PREPROCESS
-        # =========================
         img = img.resize(IMG_SIZE)
         arr = np.array(img).astype(np.float32)
         arr = preprocess_input(arr)
@@ -139,9 +138,7 @@ def predict(
 
         print("IMAGE PREPROCESSED")
 
-        # =========================
         # MODEL
-        # =========================
         model = get_model()
         print("MODEL READY")
 
@@ -151,34 +148,26 @@ def predict(
         idx = int(np.argmax(probs))
         confidence = float(probs[idx])
 
-        # =========================
         # THRESHOLD
-        # =========================
         if confidence < 0.8:
             tank_name = "Unknown try another image"
         else:
             tank_name = class_names[idx]
 
-        # =========================
         # DATABASE
-        # =========================
         tank = None
         if tank_name != "Unknown":
             tank = session.exec(
                 select(Tank).where(Tank.name.ilike(f"%{tank_name}%"))
             ).first()
 
-        # =========================
-        # CURRENT STATE
-        # =========================
+        # STATE
         current_tank = {
             "name": tank.name if tank else tank_name,
             "description": tank.description if tank else ""
         }
 
-        # =========================
         # CHAT RESET
-        # =========================
         chat_history = [
             {
                 "role": "system",
@@ -192,17 +181,15 @@ Description: {current_tank['description']}
             }
         ]
 
-        # =========================
         # GPT
-        # =========================
-        if tank_name == "Unknown":
-            gpt_text = "This does not look like a tank. Please try another image."
+        if tank_name == "Unknown try another image":
+            gpt_text = "This does not look like a tank. Try another image."
         else:
             try:
                 gpt_text = ask_gpt(chat_history)
             except Exception as e:
                 print("GPT ERROR:", e)
-                gpt_text = "AI is currently unavailable."
+                gpt_text = "AI is unavailable."
 
         print("DONE PREDICT")
 
@@ -226,8 +213,6 @@ Description: {current_tank['description']}
 def chat(req: ChatRequest):
     global chat_history, current_tank
 
-    message = req.message
-
     context = f"""
 Current tank: {current_tank.get("name")}
 Description: {current_tank.get("description")}
@@ -235,7 +220,7 @@ Description: {current_tank.get("description")}
 
     chat_history.append({
         "role": "user",
-        "content": context + "\nUser: " + message
+        "content": context + "\nUser: " + req.message
     })
 
     reply = ask_gpt(chat_history)
