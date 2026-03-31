@@ -61,7 +61,7 @@ def get_model():
     global model
 
     if model is None:
-        model_files = list(MODELS_DIR.glob("*.h5"))  # 🔥 مهم
+        model_files = list(MODELS_DIR.glob("*.keras")) or list(MODELS_DIR.glob("*.h5"))  # 🔥 مهم
 
         if not model_files:
             raise Exception("NO MODEL FILE FOUND IN models/")
