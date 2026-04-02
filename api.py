@@ -20,6 +20,10 @@ import os
 from openai import OpenAI
 from pydantic import BaseModel
 
+from fastapi import Request
+
+
+
 # =========================
 # ENV
 # =========================
@@ -33,6 +37,10 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc"
 )
+
+@app.options("/{full_path:path}")
+async def preflight_handler(request: Request):
+    return {}
 
 app.add_middleware(
     CORSMiddleware,
