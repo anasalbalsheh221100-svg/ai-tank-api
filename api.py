@@ -36,8 +36,8 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # يسمح لأي frontend (Flutter web)
-    allow_credentials=False,
+    allow_origins=["*"],   # ok for now
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
