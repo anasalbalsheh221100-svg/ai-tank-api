@@ -1,9 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
+import 'dart:html' as html;
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'package:image_picker/image_picker.dart';
-import 'package:http_parser/http_parser.dart';
 
 class ChatPage extends StatefulWidget {
   const ChatPage({super.key});
@@ -14,17 +12,15 @@ class ChatPage extends StatefulWidget {
 
 class _ChatPageState extends State<ChatPage> {
   final TextEditingController controller = TextEditingController();
-  final picker = ImagePicker();
   final ScrollController _scrollController = ScrollController();
 
   List<Map<String, dynamic>> messages = [];
   bool isLoading = false;
 
-  // 🔥 BASE URL (change once only)
   final String baseUrl = "https://ai-tank-api-13cc.onrender.com";
 
   // =========================
-  // AUTO SCROLL
+  // SCROLL
   // =========================
   void scrollToBottom() {
     Future.delayed(const Duration(milliseconds: 100), () {
@@ -37,56 +33,32 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   // =========================
-  // WAKE SERVER (IMPORTANT)
-  // =========================
-  Future<void> wakeServer() async {
-    try {
-      await http.get(Uri.parse("$baseUrl/test"));
-      print("Server awakened");
-    } catch (e) {
-      print("Wake error: $e");
-    }
-  }
-
-  // =========================
-  // SEND TEXT
+  // SEND TEXT (FIXED)
   // =========================
   Future<void> sendMessage() async {
     if (controller.text.isEmpty) return;
 
-    final userText = controller.text;
+    final text = controller.text;
 
     setState(() {
-      messages.add({"role": "user", "text": userText});
+      messages.add({"role": "user", "text": text});
       isLoading = true;
     });
 
-    scrollToBottom();
-
     try {
-      await wakeServer(); // 🔥 fix cold start
-
-      var res = await http.post(
-        Uri.parse("$baseUrl/chat"),
-        headers: {"Content-Type": "application/json"},
-        body: jsonEncode({"message": userText}),
+      final response = await html.HttpRequest.request(
+        "$baseUrl/chat",
+        method: "POST",
+        sendData: jsonEncode({"message": text}),
+        requestHeaders: {
+          "Content-Type": "application/json",
+        },
       );
 
-      print("STATUS: ${res.statusCode}");
-      print("BODY: ${res.body}");
+      print("STATUS: ${response.status}");
+      print("BODY: ${response.responseText}");
 
-      if (res.statusCode != 200) {
-        setState(() {
-          messages.add({
-            "role": "bot",
-            "text": "Server error: ${res.body}",
-          });
-          isLoading = false;
-        });
-        return;
-      }
-
-      final decoded = jsonDecode(res.body);
+      final decoded = jsonDecode(response.responseText!);
 
       setState(() {
         messages.add({
@@ -96,88 +68,86 @@ class _ChatPageState extends State<ChatPage> {
         isLoading = false;
       });
     } catch (e) {
-      print("ERROR: $e");
+      print("CHAT ERROR: $e");
 
       setState(() {
         messages.add({
           "role": "bot",
-          "text": "Error sending message",
+          "text": "Error: $e"
         });
         isLoading = false;
       });
     }
 
-    scrollToBottom();
     controller.clear();
+    scrollToBottom();
   }
 
   // =========================
-  // SEND IMAGE
+  // SEND IMAGE (FIXED)
   // =========================
   Future<void> sendImage() async {
-    final picked = await picker.pickImage(source: ImageSource.gallery);
-    if (picked == null) return;
+    final input = html.FileUploadInputElement();
+    input.accept = 'image/*';
+    input.click();
 
-    Uint8List bytes = await picked.readAsBytes();
+    input.onChange.listen((event) {
+      final file = input.files!.first;
+      final reader = html.FileReader();
 
-    setState(() {
-      messages.add({"role": "user", "image": bytes});
-      isLoading = true;
+      reader.readAsArrayBuffer(file);
+
+      reader.onLoadEnd.listen((event) async {
+        Uint8List bytes = reader.result as Uint8List;
+
+        setState(() {
+          messages.add({"role": "user", "image": bytes});
+          isLoading = true;
+        });
+
+        final formData = html.FormData();
+        formData.appendBlob("file", html.Blob([bytes]), "image.jpg");
+
+        try {
+          final response = await html.HttpRequest.request(
+            "$baseUrl/predict",
+            method: "POST",
+            sendData: formData,
+          );
+
+          print("PREDICT: ${response.responseText}");
+
+          final decoded = jsonDecode(response.responseText!);
+
+          setState(() {
+            messages.add({
+              "role": "bot",
+              "text": decoded["error"] ??
+                  "Tank: ${decoded['tank_name']}\n"
+                  "Confidence: ${(decoded['confidence'] * 100).toStringAsFixed(2)}%\n\n"
+                  "${decoded['gpt_explanation']}",
+            });
+            isLoading = false;
+          });
+        } catch (e) {
+          print("IMAGE ERROR: $e");
+
+          setState(() {
+            messages.add({
+              "role": "bot",
+              "text": "Failed to send image"
+            });
+            isLoading = false;
+          });
+        }
+
+        scrollToBottom();
+      });
     });
-
-    scrollToBottom();
-
-    var request = http.MultipartRequest(
-      'POST',
-      Uri.parse("$baseUrl/predict"),
-    );
-
-    request.files.add(
-      http.MultipartFile.fromBytes(
-        'file',
-        bytes,
-        filename: "image.jpg",
-        contentType: MediaType('image', 'jpeg'),
-      ),
-    );
-
-    try {
-      await wakeServer(); // 🔥 fix cold start
-
-      var response = await request.send();
-
-      var resBody = await response.stream.bytesToString();
-      print("PREDICT RESPONSE: $resBody");
-
-      final decoded = jsonDecode(resBody);
-
-      setState(() {
-        messages.add({
-          "role": "bot",
-          "text": decoded["error"] ??
-              "Tank: ${decoded['tank_name']}\n"
-              "Confidence: ${(decoded['confidence'] * 100).toStringAsFixed(2)}%\n\n"
-              "${decoded['gpt_explanation']}",
-        });
-        isLoading = false;
-      });
-    } catch (e) {
-      print("IMAGE ERROR: $e");
-
-      setState(() {
-        messages.add({
-          "role": "bot",
-          "text": "Failed to send image",
-        });
-        isLoading = false;
-      });
-    }
-
-    scrollToBottom();
   }
 
   // =========================
-  // MESSAGE UI
+  // UI MESSAGE
   // =========================
   Widget buildMessage(Map<String, dynamic> msg) {
     bool isUser = msg['role'] == 'user';
