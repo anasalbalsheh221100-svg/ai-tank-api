@@ -1,24 +1,23 @@
-# =========================
-# IMPORTS
-# =========================
 import io
 import json
-import numpy as np
+import os
 from pathlib import Path
-from fastapi import FastAPI, UploadFile, File, Depends, Request
+
+import numpy as np
 import tensorflow as tf
+from dotenv import load_dotenv
+from fastapi import FastAPI, UploadFile, File, Depends, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, Response
+from openai import OpenAI
 from PIL import Image, ImageFile
+from pydantic import BaseModel
+from sqlmodel import SQLModel, Session, select
 from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 
-from sqlmodel import SQLModel, Session, select
 from database import engine, get_session
 from models import Tank
-from fastapi.middleware.cors import CORSMiddleware
 
-from dotenv import load_dotenv
-import os
-from openai import OpenAI
-from pydantic import BaseModel
 
 # =========================
 # ENV
@@ -35,22 +34,45 @@ app = FastAPI(
 )
 
 # =========================
-# 🔥 FIX CORS (FINAL)
+# CORS
 # =========================
+origins = [
+    "http://localhost",
+    "http://localhost:3000",
+    "http://localhost:5000",
+    "http://localhost:60252",
+    "http://127.0.0.1",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5000",
+    "http://127.0.0.1:60252",
+    "https://ai-tank-api-13cc.onrender.com",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # allow ALL (fix dynamic ports)
-    allow_credentials=False,      # MUST be False with "*"
+    allow_origins=origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # =========================
-# 🔥 HANDLE PREFLIGHT
+# PREFLIGHT
 # =========================
 @app.options("/{path:path}")
-async def options_handler(request: Request):
-    return {}
+async def options_handler(path: str, request: Request):
+    origin = request.headers.get("origin", "")
+    headers = {
+        "Access-Control-Allow-Methods": "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT",
+        "Access-Control-Allow-Headers": "*",
+        "Access-Control-Max-Age": "86400",
+    }
+
+    if origin in origins:
+        headers["Access-Control-Allow-Origin"] = origin
+
+    return Response(status_code=204, headers=headers)
 
 # =========================
 # DB
@@ -127,6 +149,17 @@ class ChatRequest(BaseModel):
     message: str
 
 # =========================
+# HEALTH / TEST
+# =========================
+@app.get("/")
+def root():
+    return {"message": "AI Tank API is running"}
+
+@app.get("/test")
+def test():
+    return {"working": True}
+
+# =========================
 # PREDICT
 # =========================
 @app.post("/predict")
@@ -134,6 +167,10 @@ def predict(file: UploadFile = File(...), session: Session = Depends(get_session
     global current_tank, chat_history
 
     try:
+        print("PREDICT REQUEST RECEIVED")
+        print("FILENAME:", file.filename)
+        print("CONTENT TYPE:", file.content_type)
+
         ImageFile.LOAD_TRUNCATED_IMAGES = True
         file.file.seek(0)
 
@@ -144,8 +181,8 @@ def predict(file: UploadFile = File(...), session: Session = Depends(get_session
         arr = preprocess_input(arr)
         arr = np.expand_dims(arr, axis=0)
 
-        model = get_model()
-        probs = model.predict(arr)[0]
+        loaded_model = get_model()
+        probs = loaded_model.predict(arr)[0]
 
         idx = int(np.argmax(probs))
         confidence = float(probs[idx])
@@ -168,7 +205,7 @@ def predict(file: UploadFile = File(...), session: Session = Depends(get_session
                 "role": "system",
                 "content": f"""
 You are a military museum guide.
-Explain simply.
+Explain simply and clearly for normal visitors.
 
 Tank: {current_tank['name']}
 Description: {current_tank['description']}
@@ -188,8 +225,11 @@ Description: {current_tank['description']}
         }
 
     except Exception as e:
-        print("ERROR:", e)
-        return {"error": str(e)}
+        print("PREDICT ERROR:", e)
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
 
 # =========================
 # CHAT
@@ -198,25 +238,28 @@ Description: {current_tank['description']}
 def chat(req: ChatRequest):
     global chat_history, current_tank
 
-    context = f"""
+    try:
+        print("CHAT REQUEST RECEIVED:", req.message)
+
+        context = f"""
 Tank: {current_tank.get("name")}
 Description: {current_tank.get("description")}
 """
 
-    chat_history.append({
-        "role": "user",
-        "content": context + "\nUser: " + req.message
-    })
+        chat_history.append({
+            "role": "user",
+            "content": context + "\nUser: " + req.message
+        })
 
-    reply = ask_gpt(chat_history)
+        reply = ask_gpt(chat_history)
 
-    chat_history.append({"role": "assistant", "content": reply})
+        chat_history.append({"role": "assistant", "content": reply})
 
-    return {"reply": reply}
+        return {"reply": reply}
 
-# =========================
-# TEST
-# =========================
-@app.get("/test")
-def test():
-    return {"working": True}
+    except Exception as e:
+        print("CHAT ERROR:", e)
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
