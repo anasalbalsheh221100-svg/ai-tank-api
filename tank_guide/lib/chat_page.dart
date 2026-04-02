@@ -1,4 +1,3 @@
-
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
@@ -21,6 +20,9 @@ class _ChatPageState extends State<ChatPage> {
   List<Map<String, dynamic>> messages = [];
   bool isLoading = false;
 
+  // 🔥 BASE URL (change once only)
+  final String baseUrl = "https://ai-tank-api-13cc.onrender.com";
+
   // =========================
   // AUTO SCROLL
   // =========================
@@ -32,6 +34,18 @@ class _ChatPageState extends State<ChatPage> {
         curve: Curves.easeOut,
       );
     });
+  }
+
+  // =========================
+  // WAKE SERVER (IMPORTANT)
+  // =========================
+  Future<void> wakeServer() async {
+    try {
+      await http.get(Uri.parse("$baseUrl/test"));
+      print("Server awakened");
+    } catch (e) {
+      print("Wake error: $e");
+    }
   }
 
   // =========================
@@ -50,11 +64,16 @@ class _ChatPageState extends State<ChatPage> {
     scrollToBottom();
 
     try {
+      await wakeServer(); // 🔥 fix cold start
+
       var res = await http.post(
-        Uri.parse("https://ai-tank-api-13cc.onrender.com/chat"), // ✅ updated URL
+        Uri.parse("$baseUrl/chat"),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({"message": userText}),
-      ).timeout(const Duration(seconds: 60));
+      );
+
+      print("STATUS: ${res.statusCode}");
+      print("BODY: ${res.body}");
 
       if (res.statusCode != 200) {
         setState(() {
@@ -77,10 +96,12 @@ class _ChatPageState extends State<ChatPage> {
         isLoading = false;
       });
     } catch (e) {
+      print("ERROR: $e");
+
       setState(() {
         messages.add({
           "role": "bot",
-          "text": "Error sending message"
+          "text": "Error sending message",
         });
         isLoading = false;
       });
@@ -108,7 +129,7 @@ class _ChatPageState extends State<ChatPage> {
 
     var request = http.MultipartRequest(
       'POST',
-      Uri.parse("https://ai-tank-api-13cc.onrender.com/predict"), // ✅ updated URL
+      Uri.parse("$baseUrl/predict"),
     );
 
     request.files.add(
@@ -121,11 +142,13 @@ class _ChatPageState extends State<ChatPage> {
     );
 
     try {
-      var response = await request.send().timeout(
-        const Duration(seconds: 60),
-      );
+      await wakeServer(); // 🔥 fix cold start
+
+      var response = await request.send();
 
       var resBody = await response.stream.bytesToString();
+      print("PREDICT RESPONSE: $resBody");
+
       final decoded = jsonDecode(resBody);
 
       setState(() {
@@ -134,12 +157,13 @@ class _ChatPageState extends State<ChatPage> {
           "text": decoded["error"] ??
               "Tank: ${decoded['tank_name']}\n"
               "Confidence: ${(decoded['confidence'] * 100).toStringAsFixed(2)}%\n\n"
-              "${decoded['gpt_explanation']}", // ✅ added GPT output
+              "${decoded['gpt_explanation']}",
         });
         isLoading = false;
       });
     } catch (e) {
-        print("ERROR: $e");
+      print("IMAGE ERROR: $e");
+
       setState(() {
         messages.add({
           "role": "bot",
@@ -230,4 +254,3 @@ class _ChatPageState extends State<ChatPage> {
     );
   }
 }
-
