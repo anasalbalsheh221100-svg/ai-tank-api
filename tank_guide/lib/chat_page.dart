@@ -19,6 +19,8 @@ class _ChatPageState extends State<ChatPage> {
   final ImagePicker picker = ImagePicker();
 
   final String baseUrl = "https://ai-tank-api-l3cc.onrender.com";
+  // emulator: http://10.0.2.2:8000
+  // real phone: http://YOUR_PC_IP:8000
 
   List<Map<String, dynamic>> messages = [];
   bool isLoading = false;
@@ -99,7 +101,11 @@ class _ChatPageState extends State<ChatPage> {
     });
   }
 
-  Future<Map<String, dynamic>> sendPredictRequest(Uint8List bytes, String filename) async {
+  Future<Map<String, dynamic>> sendPredictRequest(
+    Uint8List bytes,
+    String filename,
+    String message,
+  ) async {
     if (!serverReady) {
       await wakeServer();
     }
@@ -117,6 +123,8 @@ class _ChatPageState extends State<ChatPage> {
       ),
     );
 
+    request.fields["message"] = message;
+
     final streamedResponse =
         await request.send().timeout(const Duration(seconds: 120));
 
@@ -124,7 +132,7 @@ class _ChatPageState extends State<ChatPage> {
 
     if (streamedResponse.statusCode != 200) {
       throw Exception(
-        "Predict failed: ${streamedResponse.statusCode}\n$responseBody",
+        "Request failed: ${streamedResponse.statusCode}\n$responseBody",
       );
     }
 
@@ -184,28 +192,25 @@ class _ChatPageState extends State<ChatPage> {
 
     try {
       if (hasImage && imageBytes != null) {
-        final predictData = await sendPredictRequest(imageBytes, imageName);
+        final decoded = await sendPredictRequest(imageBytes, imageName, text);
 
-        final predictText = predictData["error"] ??
-            "Tank: ${predictData['tank_name']}\n\n"
-                "${predictData['gpt_explanation'] ?? predictData['description'] ?? 'No explanation'}";
+        final replyText = decoded["error"] ??
+            "Tank: ${decoded['tank_name']}\n\n"
+                "${decoded['reply'] ?? decoded['description'] ?? 'No reply'}";
 
         setState(() {
           messages.add({
             "role": "bot",
-            "text": predictText,
+            "text": replyText,
           });
         });
-        scrollToBottom();
-      }
-
-      if (hasText) {
-        final chatData = await sendChatRequest(text);
+      } else {
+        final decoded = await sendChatRequest(text);
 
         setState(() {
           messages.add({
             "role": "bot",
-            "text": chatData["reply"] ?? "No reply from server",
+            "text": decoded["reply"] ?? "No reply from server",
           });
         });
       }

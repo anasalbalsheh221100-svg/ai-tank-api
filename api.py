@@ -6,7 +6,7 @@ from typing import Optional
 import numpy as np
 import tensorflow as tf
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, Depends, Request
+from fastapi import FastAPI, UploadFile, File, Depends, Request, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from openai import OpenAI
@@ -177,7 +177,7 @@ def ask_gpt(messages):
         return response.choices[0].message.content
     except Exception as e:
         print("GPT ERROR:", e)
-        return "GPT error"
+        return "Sorry, I could not generate a response right now."
 
 
 def find_tank_in_db(session: Session, tank_name: str) -> Optional[Tank]:
@@ -194,7 +194,7 @@ Rules:
 - Keep the reply short and easy.
 - Use simple everyday language.
 - Maximum 3 short paragraphs.
-- Prefer 50 to 90 words.
+- Prefer 40 to 80 words.
 - Do not give long technical details unless the user asks.
 - Focus on:
   1. what it is
@@ -204,6 +204,7 @@ Rules:
 - If the user asks for more detail, then expand.
 - Avoid difficult military terms unless you explain them simply.
 - Sound natural, warm, and clear.
+- If the tank is unknown, never guess.
 
 Tank: {tank_name}
 Description: {description}
@@ -247,16 +248,21 @@ def test():
 
 
 # =========================
-# PREDICT
+# PREDICT + OPTIONAL MESSAGE
 # =========================
 @app.post("/predict")
-def predict(file: UploadFile = File(...), session: Session = Depends(get_session)):
+def predict(
+    file: UploadFile = File(...),
+    message: str = Form(""),
+    session: Session = Depends(get_session)
+):
     global current_tank, chat_history
 
     try:
         print("PREDICT REQUEST RECEIVED")
         print("FILENAME:", file.filename)
         print("CONTENT TYPE:", file.content_type)
+        print("MESSAGE:", message)
 
         if not file.filename:
             return JSONResponse(
@@ -291,24 +297,44 @@ def predict(file: UploadFile = File(...), session: Session = Depends(get_session
             "description": tank.description if tank else ""
         }
 
+        system_prompt = build_system_prompt(
+            current_tank["name"],
+            current_tank["description"]
+        )
+
         chat_history = [
             {
                 "role": "system",
-                "content": build_system_prompt(
-                    current_tank["name"],
-                    current_tank["description"]
-                )
+                "content": system_prompt
             }
         ]
 
-        gpt_text = ask_gpt(chat_history) if tank_name != "Unknown" else "Please try another image."
+        if tank_name == "Unknown":
+            return {
+                "tank_name": "Unknown",
+                "country": None,
+                "year": None,
+                "description": "",
+                "reply": "I could not recognize this tank clearly. Please try another clearer image."
+            }
+
+        if message.strip():
+            chat_history.append({
+                "role": "user",
+                "content": message.strip()
+            })
+            reply = ask_gpt(chat_history)
+            chat_history.append({"role": "assistant", "content": reply})
+        else:
+            reply = ask_gpt(chat_history)
+            chat_history.append({"role": "assistant", "content": reply})
 
         return {
             "tank_name": current_tank["name"],
             "country": tank.country if tank else None,
             "year": tank.year if tank else None,
             "description": current_tank["description"],
-            "gpt_explanation": gpt_text
+            "reply": reply
         }
 
     except Exception as e:
@@ -320,7 +346,7 @@ def predict(file: UploadFile = File(...), session: Session = Depends(get_session
 
 
 # =========================
-# CHAT
+# CHAT ONLY (TEXT AFTER PREDICTION)
 # =========================
 @app.post("/chat")
 def chat(req: ChatRequest):
@@ -341,14 +367,15 @@ def chat(req: ChatRequest):
                 content={"error": "No tank context yet. Use /predict first."}
             )
 
-        context = f"""
-Tank: {current_tank.get("name")}
-Description: {current_tank.get("description")}
-""".strip()
+        if current_tank.get("name") == "Unknown":
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Please upload a clearer tank image first."}
+            )
 
         chat_history.append({
             "role": "user",
-            "content": context + "\nUser: " + req.message
+            "content": req.message.strip()
         })
 
         reply = ask_gpt(chat_history)
