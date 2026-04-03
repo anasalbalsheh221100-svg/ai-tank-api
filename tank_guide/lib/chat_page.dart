@@ -19,8 +19,6 @@ class _ChatPageState extends State<ChatPage> {
   final ImagePicker picker = ImagePicker();
 
   final String baseUrl = "https://ai-tank-api-l3cc.onrender.com";
-  // emulator: http://10.0.2.2:8000
-  // real phone: http://YOUR_PC_IP:8000
 
   List<Map<String, dynamic>> messages = [];
   bool isLoading = false;
@@ -60,13 +58,11 @@ class _ChatPageState extends State<ChatPage> {
           .timeout(const Duration(seconds: 60));
 
       if (!mounted) return;
-
       setState(() {
         serverReady = response.statusCode == 200;
       });
     } catch (_) {
       if (!mounted) return;
-
       setState(() {
         serverReady = false;
       });

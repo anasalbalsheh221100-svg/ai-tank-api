@@ -18,28 +18,13 @@ from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 from database import engine, get_session
 from models import Tank
 
-
-# =========================
-# ENV
-# =========================
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
+app = FastAPI(docs_url="/docs", redoc_url="/redoc")
 
-# =========================
-# APP
-# =========================
-app = FastAPI(
-    docs_url="/docs",
-    redoc_url="/redoc"
-)
-
-
-# =========================
-# CORS
-# =========================
 origins = [
     "http://localhost",
     "http://localhost:3000",
@@ -62,10 +47,6 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-
-# =========================
-# PREFLIGHT
-# =========================
 @app.options("/{path:path}")
 async def options_handler(path: str, request: Request):
     origin = request.headers.get("origin", "")
@@ -74,32 +55,18 @@ async def options_handler(path: str, request: Request):
         "Access-Control-Allow-Headers": "*",
         "Access-Control-Max-Age": "86400",
     }
-
     if origin in origins:
         headers["Access-Control-Allow-Origin"] = origin
-
     return Response(status_code=204, headers=headers)
 
-
-# =========================
-# DB
-# =========================
 SQLModel.metadata.create_all(engine)
 
-
-# =========================
-# GLOBAL STATE
-# =========================
 current_tank = {}
 chat_history = []
 
 model = None
 class_names = ["unknown"]
 
-
-# =========================
-# PATHS
-# =========================
 PROJECT_ROOT = Path(__file__).resolve().parent
 MODELS_DIR = PROJECT_ROOT / "models"
 RESULTS_DIR = PROJECT_ROOT / "results" / "improved_gray_balanced"
@@ -108,20 +75,16 @@ MODEL_PATH = MODELS_DIR / "model_fixed.keras"
 METRICS_PATH = RESULTS_DIR / "metrics.json"
 
 IMG_SIZE = (224, 224)
-CONFIDENCE_THRESHOLD = 0.80
+CONFIDENCE_THRESHOLD = 0.92
 
 
-# =========================
-# HELPERS
-# =========================
 def load_class_names():
     global class_names
-
     if METRICS_PATH.exists():
         try:
             data = json.loads(METRICS_PATH.read_text(encoding="utf-8"))
             names = data.get("class_names", [])
-            if isinstance(names, list) and len(names) > 0:
+            if isinstance(names, list) and names:
                 class_names = names
                 print("CLASS NAMES LOADED:", class_names)
                 return
@@ -129,29 +92,24 @@ def load_class_names():
             print("FAILED TO LOAD CLASS NAMES:", e)
 
     class_names = ["unknown"]
-    print("USING FALLBACK CLASS NAMES:", class_names)
 
 
 def get_model():
     global model
-
     if model is None:
         if not MODEL_PATH.exists():
             raise Exception(f"MODEL NOT FOUND: {MODEL_PATH}")
-
         print("LOADING MODEL:", MODEL_PATH)
         model = tf.keras.models.load_model(
             MODEL_PATH,
             compile=False,
             safe_mode=False
         )
-
     return model
 
 
 def preprocess_uploaded_image(file_obj) -> np.ndarray:
     ImageFile.LOAD_TRUNCATED_IMAGES = True
-
     img = Image.open(file_obj).convert("RGB")
     img = img.convert("L").convert("RGB")
     img = img.resize(IMG_SIZE)
@@ -159,7 +117,6 @@ def preprocess_uploaded_image(file_obj) -> np.ndarray:
     arr = np.array(img).astype(np.float32)
     arr = preprocess_input(arr)
     arr = np.expand_dims(arr, axis=0)
-
     return arr
 
 
@@ -211,16 +168,10 @@ Description: {description}
 """.strip()
 
 
-# =========================
-# CHAT MODEL
-# =========================
 class ChatRequest(BaseModel):
     message: str
 
 
-# =========================
-# STARTUP
-# =========================
 @app.on_event("startup")
 def startup_event():
     load_class_names()
@@ -230,9 +181,6 @@ def startup_event():
         print("MODEL LOAD ON STARTUP FAILED:", e)
 
 
-# =========================
-# HEALTH / TEST
-# =========================
 @app.get("/")
 def root():
     return {
@@ -247,9 +195,6 @@ def test():
     return {"working": True}
 
 
-# =========================
-# PREDICT + OPTIONAL MESSAGE
-# =========================
 @app.post("/predict")
 def predict(
     file: UploadFile = File(...),
@@ -259,16 +204,8 @@ def predict(
     global current_tank, chat_history
 
     try:
-        print("PREDICT REQUEST RECEIVED")
-        print("FILENAME:", file.filename)
-        print("CONTENT TYPE:", file.content_type)
-        print("MESSAGE:", message)
-
         if not file.filename:
-            return JSONResponse(
-                status_code=400,
-                content={"error": "No file name provided"}
-            )
+            return JSONResponse(status_code=400, content={"error": "No file name provided"})
 
         file.file.seek(0)
         arr = preprocess_uploaded_image(file.file)
@@ -297,20 +234,19 @@ def predict(
             "description": tank.description if tank else ""
         }
 
-        system_prompt = build_system_prompt(
-            current_tank["name"],
-            current_tank["description"]
-        )
-
         chat_history = [
             {
                 "role": "system",
-                "content": system_prompt
+                "content": build_system_prompt(
+                    current_tank["name"],
+                    current_tank["description"]
+                )
             }
         ]
 
         if tank_name == "Unknown":
             return {
+                "mode": "image",
                 "tank_name": "Unknown",
                 "country": None,
                 "year": None,
@@ -319,10 +255,7 @@ def predict(
             }
 
         if message.strip():
-            chat_history.append({
-                "role": "user",
-                "content": message.strip()
-            })
+            chat_history.append({"role": "user", "content": message.strip()})
             reply = ask_gpt(chat_history)
             chat_history.append({"role": "assistant", "content": reply})
         else:
@@ -330,6 +263,7 @@ def predict(
             chat_history.append({"role": "assistant", "content": reply})
 
         return {
+            "mode": "image",
             "tank_name": current_tank["name"],
             "country": tank.country if tank else None,
             "year": tank.year if tank else None,
@@ -339,57 +273,80 @@ def predict(
 
     except Exception as e:
         print("PREDICT ERROR:", e)
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(e)}
-        )
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
-# =========================
-# CHAT ONLY (TEXT AFTER PREDICTION)
-# =========================
 @app.post("/chat")
 def chat(req: ChatRequest):
     global chat_history, current_tank
 
     try:
-        print("CHAT REQUEST RECEIVED:", req.message)
+        message = req.message.strip()
+        if not message:
+            return JSONResponse(status_code=400, content={"error": "Message cannot be empty"})
 
-        if not req.message.strip():
-            return JSONResponse(
-                status_code=400,
-                content={"error": "Message cannot be empty"}
-            )
-
+        # chat عام بدون صورة سابقة
         if not current_tank:
-            return JSONResponse(
-                status_code=400,
-                content={"error": "No tank context yet. Use /predict first."}
-            )
+            general_messages = [
+                {
+                    "role": "system",
+                    "content": """
+You are a friendly military museum guide for normal visitors, not experts.
 
-        if current_tank.get("name") == "Unknown":
-            return JSONResponse(
-                status_code=400,
-                content={"error": "Please upload a clearer tank image first."}
-            )
+Rules:
+- Keep the reply short and easy.
+- Use simple everyday language.
+- Maximum 3 short paragraphs.
+- Prefer 40 to 80 words.
+- Do not give long technical details unless the user asks.
+- If the user asks a general question, answer it normally.
+- Sound natural, warm, and clear.
+""".strip()
+                },
+                {"role": "user", "content": message}
+            ]
+            reply = ask_gpt(general_messages)
+            return {"mode": "text", "reply": reply}
 
-        chat_history.append({
-            "role": "user",
-            "content": req.message.strip()
-        })
+        # chat مبني على آخر تانك معروف
+        if current_tank.get("name") != "Unknown":
+            if not chat_history:
+                chat_history = [
+                    {
+                        "role": "system",
+                        "content": build_system_prompt(
+                            current_tank.get("name", ""),
+                            current_tank.get("description", "")
+                        )
+                    }
+                ]
 
-        reply = ask_gpt(chat_history)
+            chat_history.append({"role": "user", "content": message})
+            reply = ask_gpt(chat_history)
+            chat_history.append({"role": "assistant", "content": reply})
+            return {"mode": "contextual", "reply": reply}
 
-        chat_history.append({
-            "role": "assistant",
-            "content": reply
-        })
+        # إذا آخر صورة Unknown، جاوب بشكل عام
+        general_messages = [
+            {
+                "role": "system",
+                "content": """
+You are a friendly military museum guide for normal visitors, not experts.
 
-        return {"reply": reply}
+Rules:
+- Keep the reply short and easy.
+- Use simple everyday language.
+- Maximum 3 short paragraphs.
+- Prefer 40 to 80 words.
+- Do not give long technical details unless the user asks.
+- Sound natural, warm, and clear.
+""".strip()
+            },
+            {"role": "user", "content": message}
+        ]
+        reply = ask_gpt(general_messages)
+        return {"mode": "text", "reply": reply}
 
     except Exception as e:
         print("CHAT ERROR:", e)
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(e)}
-        )
+        return JSONResponse(status_code=500, content={"error": str(e)})
