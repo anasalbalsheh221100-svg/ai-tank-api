@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'auth_page.dart';
+import 'chat_page.dart';
 
 void main() {
   runApp(const TankGuideApp());
@@ -12,9 +12,11 @@ class TankGuideApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'AI Tank Guide',
-      theme: ThemeData(primarySwatch: Colors.blue),
-      home: const AuthPage(),
+      title: 'Tank Guide',
+      theme: ThemeData(
+        primarySwatch: Colors.blue,
+      ),
+      home: const ChatPage(),
     );
   }
 }

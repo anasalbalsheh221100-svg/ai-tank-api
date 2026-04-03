@@ -1,7 +1,7 @@
-import io
 import json
 import os
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import tensorflow as tf
@@ -23,7 +23,10 @@ from models import Tank
 # ENV
 # =========================
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
 
 # =========================
 # APP
@@ -32,6 +35,7 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc"
 )
+
 
 # =========================
 # CORS
@@ -46,6 +50,7 @@ origins = [
     "http://127.0.0.1:5000",
     "http://127.0.0.1:60252",
     "https://ai-tank-api-13cc.onrender.com",
+    "https://ai-tank-api-l3cc.onrender.com",
 ]
 
 app.add_middleware(
@@ -56,6 +61,7 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"],
 )
+
 
 # =========================
 # PREFLIGHT
@@ -74,16 +80,22 @@ async def options_handler(path: str, request: Request):
 
     return Response(status_code=204, headers=headers)
 
+
 # =========================
 # DB
 # =========================
 SQLModel.metadata.create_all(engine)
+
 
 # =========================
 # GLOBAL STATE
 # =========================
 current_tank = {}
 chat_history = []
+
+model = None
+class_names = ["unknown"]
+
 
 # =========================
 # PATHS
@@ -92,55 +104,111 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 MODELS_DIR = PROJECT_ROOT / "models"
 RESULTS_DIR = PROJECT_ROOT / "results" / "improved_gray_balanced"
 
-model = None
+MODEL_PATH = MODELS_DIR / "model_fixed.keras"
+METRICS_PATH = RESULTS_DIR / "metrics.json"
+
 IMG_SIZE = (224, 224)
+CONFIDENCE_THRESHOLD = 0.80
+
 
 # =========================
-# LOAD MODEL
+# HELPERS
 # =========================
+def load_class_names():
+    global class_names
+
+    if METRICS_PATH.exists():
+        try:
+            data = json.loads(METRICS_PATH.read_text(encoding="utf-8"))
+            names = data.get("class_names", [])
+            if isinstance(names, list) and len(names) > 0:
+                class_names = names
+                print("CLASS NAMES LOADED:", class_names)
+                return
+        except Exception as e:
+            print("FAILED TO LOAD CLASS NAMES:", e)
+
+    class_names = ["unknown"]
+    print("USING FALLBACK CLASS NAMES:", class_names)
+
+
 def get_model():
     global model
 
     if model is None:
-        model_files = list(MODELS_DIR.glob("*.keras")) or list(MODELS_DIR.glob("*.h5"))
+        if not MODEL_PATH.exists():
+            raise Exception(f"MODEL NOT FOUND: {MODEL_PATH}")
 
-        if not model_files:
-            raise Exception("NO MODEL FILE FOUND")
-
-        model_path = model_files[-1]
-        print("LOADING MODEL:", model_path)
-
+        print("LOADING MODEL:", MODEL_PATH)
         model = tf.keras.models.load_model(
-            model_path,
+            MODEL_PATH,
             compile=False,
             safe_mode=False
         )
 
     return model
 
-# =========================
-# CLASS NAMES
-# =========================
-metrics_path = RESULTS_DIR / "metrics.json"
 
-if metrics_path.exists():
-    class_names = json.loads(metrics_path.read_text())["class_names"]
-else:
-    class_names = ["unknown"]
+def preprocess_uploaded_image(file_obj) -> np.ndarray:
+    ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-# =========================
-# GPT
-# =========================
+    img = Image.open(file_obj).convert("RGB")
+    img = img.convert("L").convert("RGB")
+    img = img.resize(IMG_SIZE)
+
+    arr = np.array(img).astype(np.float32)
+    arr = preprocess_input(arr)
+    arr = np.expand_dims(arr, axis=0)
+
+    return arr
+
+
 def ask_gpt(messages):
+    if client is None:
+        return "OpenAI key not configured."
+
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=messages
+            messages=messages,
+            max_tokens=120,
+            temperature=0.6,
         )
         return response.choices[0].message.content
     except Exception as e:
         print("GPT ERROR:", e)
         return "GPT error"
+
+
+def find_tank_in_db(session: Session, tank_name: str) -> Optional[Tank]:
+    return session.exec(
+        select(Tank).where(Tank.name.ilike(f"%{tank_name}%"))
+    ).first()
+
+
+def build_system_prompt(tank_name: str, description: str) -> str:
+    return f"""
+You are a friendly military museum guide for normal visitors, not experts.
+
+Rules:
+- Keep the reply short and easy.
+- Use simple everyday language.
+- Maximum 3 short paragraphs.
+- Prefer 50 to 90 words.
+- Do not give long technical details unless the user asks.
+- Focus on:
+  1. what it is
+  2. why it is important
+  3. one interesting fact
+- If the user asks a simple question, answer simply.
+- If the user asks for more detail, then expand.
+- Avoid difficult military terms unless you explain them simply.
+- Sound natural, warm, and clear.
+
+Tank: {tank_name}
+Description: {description}
+""".strip()
+
 
 # =========================
 # CHAT MODEL
@@ -148,16 +216,35 @@ def ask_gpt(messages):
 class ChatRequest(BaseModel):
     message: str
 
+
+# =========================
+# STARTUP
+# =========================
+@app.on_event("startup")
+def startup_event():
+    load_class_names()
+    try:
+        get_model()
+    except Exception as e:
+        print("MODEL LOAD ON STARTUP FAILED:", e)
+
+
 # =========================
 # HEALTH / TEST
 # =========================
 @app.get("/")
 def root():
-    return {"message": "AI Tank API is running"}
+    return {
+        "message": "AI Tank API is running",
+        "model_exists": MODEL_PATH.exists(),
+        "metrics_exists": METRICS_PATH.exists(),
+    }
+
 
 @app.get("/test")
 def test():
     return {"working": True}
+
 
 # =========================
 # PREDICT
@@ -171,29 +258,33 @@ def predict(file: UploadFile = File(...), session: Session = Depends(get_session
         print("FILENAME:", file.filename)
         print("CONTENT TYPE:", file.content_type)
 
-        ImageFile.LOAD_TRUNCATED_IMAGES = True
+        if not file.filename:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "No file name provided"}
+            )
+
         file.file.seek(0)
-
-        img = Image.open(file.file).convert("RGB")
-        img = img.resize(IMG_SIZE)
-
-        arr = np.array(img).astype(np.float32)
-        arr = preprocess_input(arr)
-        arr = np.expand_dims(arr, axis=0)
+        arr = preprocess_uploaded_image(file.file)
 
         loaded_model = get_model()
-        probs = loaded_model.predict(arr)[0]
+        probs = loaded_model.predict(arr, verbose=0)[0]
 
         idx = int(np.argmax(probs))
         confidence = float(probs[idx])
 
-        tank_name = class_names[idx] if confidence >= 0.8 else "Unknown"
+        if idx >= len(class_names):
+            raise Exception(
+                f"Predicted class index {idx} is out of range. "
+                f"class_names length = {len(class_names)}"
+            )
+
+        predicted_name = class_names[idx]
+        tank_name = predicted_name if confidence >= CONFIDENCE_THRESHOLD else "Unknown"
 
         tank = None
         if tank_name != "Unknown":
-            tank = session.exec(
-                select(Tank).where(Tank.name.ilike(f"%{tank_name}%"))
-            ).first()
+            tank = find_tank_in_db(session, tank_name)
 
         current_tank = {
             "name": tank.name if tank else tank_name,
@@ -203,21 +294,17 @@ def predict(file: UploadFile = File(...), session: Session = Depends(get_session
         chat_history = [
             {
                 "role": "system",
-                "content": f"""
-You are a military museum guide.
-Explain simply and clearly for normal visitors.
-
-Tank: {current_tank['name']}
-Description: {current_tank['description']}
-"""
+                "content": build_system_prompt(
+                    current_tank["name"],
+                    current_tank["description"]
+                )
             }
         ]
 
-        gpt_text = ask_gpt(chat_history) if tank_name != "Unknown" else "Try another image"
+        gpt_text = ask_gpt(chat_history) if tank_name != "Unknown" else "Please try another image."
 
         return {
             "tank_name": current_tank["name"],
-            "confidence": round(confidence, 4),
             "country": tank.country if tank else None,
             "year": tank.year if tank else None,
             "description": current_tank["description"],
@@ -231,6 +318,7 @@ Description: {current_tank['description']}
             content={"error": str(e)}
         )
 
+
 # =========================
 # CHAT
 # =========================
@@ -241,10 +329,22 @@ def chat(req: ChatRequest):
     try:
         print("CHAT REQUEST RECEIVED:", req.message)
 
+        if not req.message.strip():
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Message cannot be empty"}
+            )
+
+        if not current_tank:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "No tank context yet. Use /predict first."}
+            )
+
         context = f"""
 Tank: {current_tank.get("name")}
 Description: {current_tank.get("description")}
-"""
+""".strip()
 
         chat_history.append({
             "role": "user",
@@ -253,7 +353,10 @@ Description: {current_tank.get("description")}
 
         reply = ask_gpt(chat_history)
 
-        chat_history.append({"role": "assistant", "content": reply})
+        chat_history.append({
+            "role": "assistant",
+            "content": reply
+        })
 
         return {"reply": reply}
 

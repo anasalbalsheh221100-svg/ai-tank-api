@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
-import 'dart:html' as html;
+
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:image_picker/image_picker.dart';
 
 class ChatPage extends StatefulWidget {
   const ChatPage({super.key});
@@ -13,13 +15,17 @@ class ChatPage extends StatefulWidget {
 
 class _ChatPageState extends State<ChatPage> {
   final TextEditingController controller = TextEditingController();
-  final ScrollController _scrollController = ScrollController();
+  final ScrollController scrollController = ScrollController();
+  final ImagePicker picker = ImagePicker();
 
-  final String baseUrl = "https://ai-tank-api-13cc.onrender.com";
+  final String baseUrl = "https://ai-tank-api-l3cc.onrender.com";
 
   List<Map<String, dynamic>> messages = [];
   bool isLoading = false;
   bool serverReady = false;
+
+  Uint8List? pendingImageBytes;
+  String? pendingImageName;
 
   @override
   void initState() {
@@ -27,10 +33,17 @@ class _ChatPageState extends State<ChatPage> {
     wakeServer();
   }
 
+  @override
+  void dispose() {
+    controller.dispose();
+    scrollController.dispose();
+    super.dispose();
+  }
+
   void scrollToBottom() {
-    Future.delayed(const Duration(milliseconds: 100), () {
-      if (!_scrollController.hasClients) return;
-      _scrollController.animateTo(
+    Future.delayed(const Duration(milliseconds: 150), () {
+      if (!scrollController.hasClients) return;
+      scrollController.animateTo(
         0,
         duration: const Duration(milliseconds: 300),
         curve: Curves.easeOut,
@@ -40,227 +53,290 @@ class _ChatPageState extends State<ChatPage> {
 
   Future<void> wakeServer() async {
     try {
-      final response = await html.HttpRequest.request(
-        "$baseUrl/test",
-        method: "GET",
-      ).timeout(const Duration(seconds: 60));
+      final response = await http
+          .get(Uri.parse("$baseUrl/test"))
+          .timeout(const Duration(seconds: 60));
 
-      print("WAKE STATUS: ${response.status}");
-      print("WAKE BODY: ${response.responseText}");
+      if (!mounted) return;
 
-      if (mounted) {
-        setState(() {
-          serverReady = response.status == 200;
-        });
-      }
-    } catch (e) {
-      print("WAKE ERROR: $e");
-      if (mounted) {
-        setState(() {
-          serverReady = false;
-        });
-      }
+      setState(() {
+        serverReady = response.statusCode == 200;
+      });
+    } catch (_) {
+      if (!mounted) return;
+
+      setState(() {
+        serverReady = false;
+      });
     }
   }
 
-  Future<void> sendMessage() async {
-    if (controller.text.trim().isEmpty || isLoading) return;
+  Future<void> pickImage(ImageSource source) async {
+    if (isLoading) return;
+
+    try {
+      final XFile? pickedFile = await picker.pickImage(source: source);
+      if (pickedFile == null) return;
+
+      final Uint8List bytes = await pickedFile.readAsBytes();
+
+      setState(() {
+        pendingImageBytes = bytes;
+        pendingImageName =
+            pickedFile.name.isNotEmpty ? pickedFile.name : "image.jpg";
+      });
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Failed to pick image: $e")),
+      );
+    }
+  }
+
+  void removePendingImage() {
+    setState(() {
+      pendingImageBytes = null;
+      pendingImageName = null;
+    });
+  }
+
+  Future<Map<String, dynamic>> sendPredictRequest(Uint8List bytes, String filename) async {
+    if (!serverReady) {
+      await wakeServer();
+    }
+
+    final request = http.MultipartRequest(
+      "POST",
+      Uri.parse("$baseUrl/predict"),
+    );
+
+    request.files.add(
+      http.MultipartFile.fromBytes(
+        "file",
+        bytes,
+        filename: filename,
+      ),
+    );
+
+    final streamedResponse =
+        await request.send().timeout(const Duration(seconds: 120));
+
+    final responseBody = await streamedResponse.stream.bytesToString();
+
+    if (streamedResponse.statusCode != 200) {
+      throw Exception(
+        "Predict failed: ${streamedResponse.statusCode}\n$responseBody",
+      );
+    }
+
+    return jsonDecode(responseBody) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> sendChatRequest(String text) async {
+    if (!serverReady) {
+      await wakeServer();
+    }
+
+    final response = await http
+        .post(
+          Uri.parse("$baseUrl/chat"),
+          headers: {"Content-Type": "application/json"},
+          body: jsonEncode({"message": text}),
+        )
+        .timeout(const Duration(seconds: 90));
+
+    if (response.statusCode != 200) {
+      throw Exception("Server error: ${response.statusCode}\n${response.body}");
+    }
+
+    return jsonDecode(response.body) as Map<String, dynamic>;
+  }
+
+  Future<void> sendCombinedMessage() async {
+    if (isLoading) return;
 
     final text = controller.text.trim();
+    final hasText = text.isNotEmpty;
+    final hasImage = pendingImageBytes != null;
+
+    if (!hasText && !hasImage) return;
+
+    final Uint8List? imageBytes = pendingImageBytes;
+    final String imageName = pendingImageName ?? "image.jpg";
 
     setState(() {
-      messages.add({"role": "user", "text": text});
+      if (hasImage) {
+        messages.add({
+          "role": "user",
+          "image": imageBytes,
+          if (hasText) "text": text,
+        });
+      } else {
+        messages.add({"role": "user", "text": text});
+      }
+
       isLoading = true;
+      controller.clear();
+      pendingImageBytes = null;
+      pendingImageName = null;
     });
 
     scrollToBottom();
 
     try {
-      if (!serverReady) {
-        await wakeServer();
-      }
+      if (hasImage && imageBytes != null) {
+        final predictData = await sendPredictRequest(imageBytes, imageName);
 
-      final response = await html.HttpRequest.request(
-        "$baseUrl/chat",
-        method: "POST",
-        sendData: jsonEncode({"message": text}),
-        requestHeaders: {
-          "Content-Type": "application/json",
-        },
-      ).timeout(const Duration(seconds: 90));
+        final predictText = predictData["error"] ??
+            "Tank: ${predictData['tank_name']}\n\n"
+                "${predictData['gpt_explanation'] ?? predictData['description'] ?? 'No explanation'}";
 
-      print("CHAT STATUS: ${response.status}");
-      print("CHAT BODY: ${response.responseText}");
-
-      if (response.status != 200) {
-        throw Exception(
-          "Chat failed. Status: ${response.status}, Body: ${response.responseText}",
-        );
-      }
-
-      final decoded = jsonDecode(response.responseText!);
-
-      setState(() {
-        messages.add({
-          "role": "bot",
-          "text": decoded["reply"] ?? "No reply from server",
+        setState(() {
+          messages.add({
+            "role": "bot",
+            "text": predictText,
+          });
         });
-        isLoading = false;
-      });
+        scrollToBottom();
+      }
+
+      if (hasText) {
+        final chatData = await sendChatRequest(text);
+
+        setState(() {
+          messages.add({
+            "role": "bot",
+            "text": chatData["reply"] ?? "No reply from server",
+          });
+        });
+      }
     } on TimeoutException {
       setState(() {
         messages.add({
           "role": "bot",
-          "text":
-              "Server took too long. Render free tier may be sleeping. Try again."
+          "text": "Request timed out. Try again.",
         });
-        isLoading = false;
       });
-    } catch (e, st) {
-      print("CHAT ERROR: $e");
-      print(st);
-
+    } catch (e) {
       setState(() {
         messages.add({
           "role": "bot",
-          "text": "Chat failed: $e",
+          "text": "Failed: $e",
         });
-        isLoading = false;
       });
     }
 
-    controller.clear();
+    setState(() {
+      isLoading = false;
+    });
+
     scrollToBottom();
   }
 
-  Future<void> sendImage() async {
-    if (isLoading) return;
-
-    final input = html.FileUploadInputElement();
-    input.accept = 'image/*';
-    input.click();
-
-    input.onChange.listen((event) {
-      if (input.files == null || input.files!.isEmpty) return;
-
-      final file = input.files!.first;
-      final reader = html.FileReader();
-
-      reader.readAsArrayBuffer(file);
-
-      reader.onLoadEnd.listen((event) async {
-        final result = reader.result;
-        if (result == null) return;
-
-        Uint8List bytes;
-        if (result is Uint8List) {
-          bytes = result;
-        } else if (result is ByteBuffer) {
-          bytes = Uint8List.view(result);
-        } else {
-          bytes = Uint8List.fromList(result as List<int>);
-        }
-
-        setState(() {
-          messages.add({"role": "user", "image": bytes});
-          isLoading = true;
-        });
-
-        scrollToBottom();
-
-        final formData = html.FormData();
-        formData.appendBlob("file", html.Blob([bytes]), file.name);
-
-        try {
-          if (!serverReady) {
-            await wakeServer();
-          }
-
-          final response = await html.HttpRequest.request(
-            "$baseUrl/predict",
-            method: "POST",
-            sendData: formData,
-          ).timeout(const Duration(seconds: 120));
-
-          print("PREDICT STATUS: ${response.status}");
-          print("PREDICT BODY: ${response.responseText}");
-
-          if (response.status != 200) {
-            throw Exception(
-              "Predict failed. Status: ${response.status}, Body: ${response.responseText}",
-            );
-          }
-
-          final decoded = jsonDecode(response.responseText!);
-
-          setState(() {
-            messages.add({
-              "role": "bot",
-              "text": decoded["error"] ??
-                  "Tank: ${decoded['tank_name']}\n"
-                      "Confidence: ${((decoded['confidence'] ?? 0) * 100).toStringAsFixed(2)}%\n\n"
-                      "${decoded['gpt_explanation'] ?? decoded['description'] ?? 'No explanation'}",
-            });
-            isLoading = false;
-          });
-        } on TimeoutException {
-          setState(() {
-            messages.add({
-              "role": "bot",
-              "text":
-                  "Image request timed out. Render free tier may be sleeping. Try again."
-            });
-            isLoading = false;
-          });
-        } catch (e, st) {
-          print("IMAGE ERROR: $e");
-          print(st);
-
-          setState(() {
-            messages.add({
-              "role": "bot",
-              "text": "Failed to send image: $e",
-            });
-            isLoading = false;
-          });
-        }
-
-        scrollToBottom();
-      });
-
-      reader.onError.listen((event) {
-        setState(() {
-          messages.add({
-            "role": "bot",
-            "text": "Failed to read the selected image.",
-          });
-          isLoading = false;
-        });
-      });
-    });
+  void showImageOptions() {
+    showModalBottomSheet(
+      context: context,
+      builder: (context) {
+        return SafeArea(
+          child: Wrap(
+            children: [
+              ListTile(
+                leading: const Icon(Icons.camera_alt),
+                title: const Text("Camera"),
+                onTap: () {
+                  Navigator.pop(context);
+                  pickImage(ImageSource.camera);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.photo),
+                title: const Text("Gallery"),
+                onTap: () {
+                  Navigator.pop(context);
+                  pickImage(ImageSource.gallery);
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   Widget buildMessage(Map<String, dynamic> msg) {
-    final bool isUser = msg['role'] == 'user';
+    final bool isUser = msg["role"] == "user";
 
-    return Container(
+    return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-      margin: const EdgeInsets.all(8),
       child: Container(
-        constraints: const BoxConstraints(maxWidth: 260),
+        margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         padding: const EdgeInsets.all(12),
+        constraints: const BoxConstraints(maxWidth: 300),
         decoration: BoxDecoration(
-          color: isUser ? Colors.blue : Colors.grey[300],
-          borderRadius: BorderRadius.circular(10),
+          color: isUser ? Colors.blue : Colors.grey.shade300,
+          borderRadius: BorderRadius.circular(12),
         ),
-        child: msg["image"] != null
-            ? Image.memory(msg["image"], height: 150)
-            : Text(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (msg["image"] != null)
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Image.memory(
+                  msg["image"],
+                  height: 160,
+                  fit: BoxFit.cover,
+                ),
+              ),
+            if (msg["image"] != null && msg["text"] != null)
+              const SizedBox(height: 8),
+            if (msg["text"] != null)
+              Text(
                 msg["text"] ?? "",
                 style: TextStyle(
                   color: isUser ? Colors.white : Colors.black,
+                  fontSize: 16,
                 ),
               ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget buildPendingImagePreview() {
+    if (pendingImageBytes == null) return const SizedBox.shrink();
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(10, 0, 10, 8),
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade200,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.shade400),
+      ),
+      child: Row(
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Image.memory(
+              pendingImageBytes!,
+              width: 70,
+              height: 70,
+              fit: BoxFit.cover,
+            ),
+          ),
+          const SizedBox(width: 10),
+          const Expanded(
+            child: Text(
+              "Image selected\nYou can add a message then press Send",
+              style: TextStyle(fontSize: 14),
+            ),
+          ),
+          IconButton(
+            onPressed: isLoading ? null : removePendingImage,
+            icon: const Icon(Icons.close),
+          ),
+        ],
       ),
     );
   }
@@ -273,9 +349,7 @@ class _ChatPageState extends State<ChatPage> {
         actions: [
           IconButton(
             onPressed: wakeServer,
-            icon: Icon(
-              serverReady ? Icons.cloud_done : Icons.cloud_off,
-            ),
+            icon: Icon(serverReady ? Icons.cloud_done : Icons.cloud_off),
           ),
         ],
       ),
@@ -284,16 +358,16 @@ class _ChatPageState extends State<ChatPage> {
           if (!serverReady)
             Container(
               width: double.infinity,
-              color: Colors.amber.shade200,
               padding: const EdgeInsets.all(8),
+              color: Colors.amber.shade200,
               child: const Text(
-                "Waking server... first request may be slow on Render free tier.",
+                "Waking server... first request may be slow.",
                 textAlign: TextAlign.center,
               ),
             ),
           Expanded(
             child: ListView.builder(
-              controller: _scrollController,
+              controller: scrollController,
               reverse: true,
               itemCount: messages.length,
               itemBuilder: (context, index) {
@@ -307,18 +381,19 @@ class _ChatPageState extends State<ChatPage> {
               padding: EdgeInsets.all(8.0),
               child: CircularProgressIndicator(),
             ),
+          buildPendingImagePreview(),
           Padding(
             padding: const EdgeInsets.all(10),
             child: Row(
               children: [
                 IconButton(
+                  onPressed: isLoading ? null : showImageOptions,
                   icon: const Icon(Icons.image),
-                  onPressed: isLoading ? null : sendImage,
                 ),
                 Expanded(
                   child: TextField(
                     controller: controller,
-                    onSubmitted: (_) => sendMessage(),
+                    onSubmitted: (_) => sendCombinedMessage(),
                     decoration: const InputDecoration(
                       hintText: "Ask about tank...",
                       border: OutlineInputBorder(),
@@ -326,8 +401,8 @@ class _ChatPageState extends State<ChatPage> {
                   ),
                 ),
                 IconButton(
+                  onPressed: isLoading ? null : sendCombinedMessage,
                   icon: const Icon(Icons.send),
-                  onPressed: isLoading ? null : sendMessage,
                 ),
               ],
             ),

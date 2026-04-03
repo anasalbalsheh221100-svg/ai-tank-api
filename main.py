@@ -1,5 +1,6 @@
 import json
 import time
+import random
 from pathlib import Path
 
 import numpy as np
@@ -14,24 +15,43 @@ from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLRO
 
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.metrics import matthews_corrcoef, cohen_kappa_score, f1_score
-from api import app
-
-
 
 
 # =========================
-# PATHS (نفس الفكرة: يقرأ dataset جاهز من preprocess خارجي)
+# GLOBAL SETTINGS
+# =========================
+SEED = 42
+IMG_HEIGHT = 224
+IMG_WIDTH = 224
+BATCH_SIZE = 32
+
+EPOCHS_STAGE1 = 12
+EPOCHS_STAGE2 = 8
+FINE_TUNE_LAST_N = 40
+
+USE_ONLINE_AUG = False  # keep False because train set is already augmented in preprocessing
+
+
+# =========================
+# REPRODUCIBILITY
+# =========================
+def set_seed(seed=SEED):
+    random.seed(seed)
+    np.random.seed(seed)
+    tf.keras.utils.set_random_seed(seed)
+
+
+# =========================
+# PATHS
 # =========================
 def setup_paths():
     project_root = Path(__file__).resolve().parent
 
-    # نفس الاسم اللي طلعته من preprocess المنفصل
     split_data_path = project_root / "split_dataset_gray_balanced"
 
     models_path = project_root / "models"
     models_path.mkdir(parents=True, exist_ok=True)
 
-    # نفس الفكرة: results/improved_gray_balanced
     results_path = project_root / "results" / "improved_gray_balanced"
     results_path.mkdir(parents=True, exist_ok=True)
 
@@ -48,7 +68,7 @@ def setup_paths():
 
 
 # =========================
-# MODEL (نفس الفكرة: alpha=0.75 + GAP + BN + Dense(128, relu6) + Dropout)
+# MODEL
 # =========================
 def create_model(input_shape, num_classes, alpha=0.75):
     base_model = MobileNetV2(
@@ -58,7 +78,7 @@ def create_model(input_shape, num_classes, alpha=0.75):
         alpha=alpha,
     )
 
-    # Stage 1: Freeze backbone
+    # Stage 1: freeze all backbone
     base_model.trainable = False
 
     inputs = layers.Input(shape=input_shape)
@@ -76,10 +96,9 @@ def create_model(input_shape, num_classes, alpha=0.75):
 
 
 # =========================
-# PLOTS + CONFUSION MATRIX (نفس الفكرة)
+# PLOTS
 # =========================
 def save_training_plots(history_list, out_dir: Path):
-    # Accuracy
     plt.figure(figsize=(6, 4))
     for name, h in history_list:
         plt.plot(h.history["accuracy"], label=f"{name} Train Acc")
@@ -92,7 +111,6 @@ def save_training_plots(history_list, out_dir: Path):
     plt.savefig(out_dir / "training_accuracy.png", dpi=200)
     plt.close()
 
-    # Loss
     plt.figure(figsize=(6, 4))
     for name, h in history_list:
         plt.plot(h.history["loss"], label=f"{name} Train Loss")
@@ -113,17 +131,20 @@ def save_confusion_matrix(cm, class_names, out_dir: Path):
     plt.imshow(cm, interpolation="nearest")
     plt.title("Confusion Matrix")
     plt.colorbar()
+
     ticks = np.arange(len(class_names))
     plt.xticks(ticks, class_names, rotation=45, ha="right")
     plt.yticks(ticks, class_names)
 
-    thresh = cm.max() / 2.0
+    thresh = cm.max() / 2.0 if cm.size > 0 else 0
     for i in range(cm.shape[0]):
         for j in range(cm.shape[1]):
             plt.text(
-                j, i, str(cm[i, j]),
+                j,
+                i,
+                str(cm[i, j]),
                 ha="center",
-                color="white" if cm[i, j] > thresh else "black"
+                color="white" if cm[i, j] > thresh else "black",
             )
 
     plt.ylabel("True Label")
@@ -134,26 +155,16 @@ def save_confusion_matrix(cm, class_names, out_dir: Path):
 
 
 # =========================
-# TRAIN + EVAL (نفس الفكرة: 2-stage + freeze BN + unfreeze last 40)
+# HELPERS
 # =========================
-def main():
-    split_data_path, models_path, results_path = setup_paths()
+def get_class_names_in_index_order(class_indices: dict):
+    class_names = [None] * len(class_indices)
+    for name, idx in class_indices.items():
+        class_names[idx] = name
+    return class_names
 
-    IMG_HEIGHT, IMG_WIDTH = 224, 224
-    BATCH_SIZE = 32
 
-    EPOCHS_STAGE1 = 12
-    EPOCHS_STAGE2 = 8
-    FINE_TUNE_LAST_N = 40
-
-    print("\n=== TensorFlow Info ===")
-    print("TF =", tf.__version__)
-    print("GPU devices:", tf.config.list_physical_devices("GPU"))
-
-    # لو preprocess عمل balancing+augmentation كملفات في train
-    # خليها False عشان ما يصير augmentation فوق augmentation
-    USE_ONLINE_AUG = False
-
+def create_generators(split_data_path: Path):
     if USE_ONLINE_AUG:
         train_datagen = ImageDataGenerator(
             preprocessing_function=preprocess_input,
@@ -162,7 +173,7 @@ def main():
             height_shift_range=0.2,
             zoom_range=0.2,
             horizontal_flip=True,
-            fill_mode="nearest"
+            fill_mode="nearest",
         )
     else:
         train_datagen = ImageDataGenerator(preprocessing_function=preprocess_input)
@@ -175,7 +186,7 @@ def main():
         batch_size=BATCH_SIZE,
         class_mode="categorical",
         shuffle=True,
-        color_mode="rgb",  # MobileNetV2 يحتاج 3 channels
+        color_mode="rgb",  # MobileNetV2 needs 3 channels
     )
 
     val_gen = eval_datagen.flow_from_directory(
@@ -196,25 +207,59 @@ def main():
         color_mode="rgb",
     )
 
-    class_names = list(train_gen.class_indices.keys())
+    return train_gen, val_gen, test_gen
+
+
+# =========================
+# MAIN
+# =========================
+def main():
+    set_seed(SEED)
+
+    split_data_path, models_path, results_path = setup_paths()
+
+    print("\n=== TensorFlow Info ===")
+    print("TF =", tf.__version__)
+    print("GPU devices:", tf.config.list_physical_devices("GPU"))
+
+    train_gen, val_gen, test_gen = create_generators(split_data_path)
+
+    class_names = get_class_names_in_index_order(train_gen.class_indices)
     print("\nClass indices:", train_gen.class_indices)
+    print("Class names :", class_names)
 
     model, base_model = create_model(
         input_shape=(IMG_HEIGHT, IMG_WIDTH, 3),
         num_classes=len(class_names),
-        alpha=0.75
+        alpha=0.75,
     )
 
-    # (اختياري بسيط) لمنع overwrite بدون تغيير فكرة التدريب:
-    # كل run اسم مختلف، لكن نفس best/final concept
     run_id = time.strftime("%Y%m%d_%H%M%S")
     best_path = models_path / f"improved_gray_balanced_best_{run_id}.keras"
     final_path = models_path / f"improved_gray_balanced_final_{run_id}.keras"
 
     callbacks = [
-        EarlyStopping(monitor="val_accuracy", patience=5, restore_best_weights=True),
-        ModelCheckpoint(best_path, monitor="val_accuracy", save_best_only=True),
-        ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=2, verbose=1),
+        EarlyStopping(
+            monitor="val_accuracy",
+            mode="max",
+            patience=5,
+            min_delta=0.001,
+            restore_best_weights=True,
+            verbose=1,
+        ),
+        ModelCheckpoint(
+            filepath=best_path,
+            monitor="val_accuracy",
+            mode="max",
+            save_best_only=True,
+            verbose=1,
+        ),
+        ReduceLROnPlateau(
+            monitor="val_loss",
+            factor=0.5,
+            patience=2,
+            verbose=1,
+        ),
     ]
 
     # =========================
@@ -263,11 +308,10 @@ def main():
     )
 
     model.save(final_path)
-
     save_training_plots([("stage1", h1), ("stage2", h2)], results_path)
 
     # =========================
-    # Evaluation (Best checkpoint)
+    # Evaluation
     # =========================
     best_model = tf.keras.models.load_model(best_path)
 
@@ -279,7 +323,13 @@ def main():
     y_pred = np.argmax(y_prob, axis=1)
     y_true = test_gen.classes
 
-    report = classification_report(y_true, y_pred, target_names=class_names, digits=4)
+    report = classification_report(
+        y_true,
+        y_pred,
+        target_names=class_names,
+        digits=4,
+        zero_division=0,
+    )
     cm = confusion_matrix(y_true, y_pred)
 
     macro_f1 = f1_score(y_true, y_pred, average="macro")
@@ -298,6 +348,11 @@ def main():
         "test_images": int(test_gen.samples),
         "class_names": class_names,
         "class_indices": train_gen.class_indices,
+        "image_size": [IMG_HEIGHT, IMG_WIDTH],
+        "batch_size": BATCH_SIZE,
+        "seed": SEED,
+        "stage1_epochs": EPOCHS_STAGE1,
+        "stage2_epochs": EPOCHS_STAGE2,
         "stage1_lr": 1e-3,
         "stage2_lr": 1e-5,
         "fine_tune_last_N_layers": int(FINE_TUNE_LAST_N),
